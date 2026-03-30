@@ -1,0 +1,262 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: funds
+    // Document ID: fundId
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required)
+    //   - totalAum: number (required)
+    //   - totalUnits: number (required)
+    //   - navPerUnit: number (required)
+    //   - cashBalance: number (required)
+    //   - userId: string (required, immutable)
+    //   - createdAt: number (required, immutable)
+    //
+    // Collection: investors
+    // Document ID: investorId
+    // Fields:
+    //   - id: string (required)
+    //   - fundId: string (required)
+    //   - name: string (required)
+    //   - capitalInvested: number (required)
+    //   - unitsOwned: number (required)
+    //   - userId: string (required, immutable)
+    //   - createdAt: number (required, immutable)
+    //
+    // Collection: ledger
+    // Document ID: transactionId
+    // Fields:
+    //   - id: string (required)
+    //   - fundId: string (required)
+    //   - investorId: string (required)
+    //   - investorName: string (required)
+    //   - type: string (required, enum: deposit, withdrawal, reval)
+    //   - amount: number (required)
+    //   - preNav: number (required)
+    //   - preUnits: number (required)
+    //   - unitPrice: number (required)
+    //   - unitsIssued: number (required)
+    //   - postUnits: number (required)
+    //   - postNav: number (required)
+    //   - date: number (required)
+    //   - userId: string (required, immutable)
+    //   - createdAt: number (required, immutable)
+    //
+    // Collection: trades
+    // Document ID: tradeId
+    // Fields:
+    //   - id: string (required)
+    //   - fundId: string (required)
+    //   - ticker: string (required)
+    //   - side: string (required, enum: buy, sell)
+    //   - shares: number (required)
+    //   - price: number (required)
+    //   - notional: number (required)
+    //   - cashImpact: number (required)
+    //   - realizedPnL: number (required)
+    //   - date: number (required)
+    //   - userId: string (required, immutable)
+    //   - createdAt: number (required, immutable)
+    //
+    // Collection: assets
+    // Document ID: assetId
+    // Fields:
+    //   - id: string (required)
+    //   - fundId: string (required)
+    //   - ticker: string (required)
+    //   - name: string (required)
+    //   - type: string (required)
+    //   - amount: number (required)
+    //   - costBasis: number (required)
+    //   - price: number (required)
+    //   - userId: string (required, immutable)
+    //   - createdAt: number (required, immutable)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "ttp2@fordham.edu" && request.auth.token.email_verified == true) ||
+          (request.auth.token.email == "triphamtranminh@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidFund(data) {
+      return hasRequiredFields(['name', 'totalAum', 'totalUnits', 'navPerUnit', 'cashBalance', 'userId', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 &&
+             data.totalAum is number &&
+             data.totalUnits is number &&
+             data.navPerUnit is number &&
+             data.cashBalance is number &&
+             data.userId is string &&
+             data.createdAt is number;
+    }
+
+    function isValidInvestor(data) {
+      return hasRequiredFields(['fundId', 'name', 'capitalInvested', 'unitsOwned', 'userId', 'createdAt']) &&
+             data.fundId is string &&
+             data.name is string && data.name.size() > 0 &&
+             data.capitalInvested is number &&
+             data.unitsOwned is number &&
+             data.userId is string &&
+             data.createdAt is number;
+    }
+
+    function isValidCapitalTransaction(data) {
+      return hasRequiredFields(['fundId', 'investorId', 'investorName', 'type', 'amount', 'preNav', 'preUnits', 'unitPrice', 'unitsIssued', 'postUnits', 'postNav', 'date', 'userId', 'createdAt']) &&
+             data.fundId is string &&
+             data.investorId is string &&
+             data.investorName is string &&
+             data.type in ['deposit', 'withdrawal', 'reval'] &&
+             data.amount is number &&
+             data.preNav is number &&
+             data.preUnits is number &&
+             data.unitPrice is number &&
+             data.unitsIssued is number &&
+             data.postUnits is number &&
+             data.postNav is number &&
+             data.date is number &&
+             data.userId is string &&
+             data.createdAt is number;
+    }
+
+    function isValidTrade(data) {
+      return hasRequiredFields(['fundId', 'ticker', 'side', 'shares', 'price', 'notional', 'cashImpact', 'realizedPnL', 'date', 'userId', 'createdAt']) &&
+             data.fundId is string &&
+             data.ticker is string &&
+             data.side in ['buy', 'sell'] &&
+             data.shares is number &&
+             data.price is number &&
+             data.notional is number &&
+             data.cashImpact is number &&
+             data.realizedPnL is number &&
+             data.date is number &&
+             data.userId is string &&
+             data.createdAt is number &&
+             (!('notes' in data) || data.notes is string);
+    }
+
+    function isValidAsset(data) {
+      return hasRequiredFields(['fundId', 'ticker', 'name', 'type', 'amount', 'costBasis', 'price', 'userId', 'createdAt']) &&
+             data.fundId is string &&
+             data.ticker is string &&
+             data.name is string &&
+             data.type is string &&
+             data.amount is number &&
+             data.costBasis is number &&
+             data.price is number &&
+             data.userId is string &&
+             data.createdAt is number &&
+             (!('date' in data) || data.date is number);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    function canReadFund(fundId) {
+      let fund = get(/databases/$(database)/documents/funds/$(fundId)).data;
+      return fund.userId == request.auth.uid || 
+             (fund.sharedWith != null && (
+               fund.sharedWith.admin.hasAny([request.auth.token.email]) ||
+               fund.sharedWith.investor.hasAny([request.auth.token.email]) ||
+               fund.sharedWith.public.hasAny([request.auth.token.email])
+             ));
+    }
+
+    match /funds/{fundId} {
+      allow read: if isAuthenticated() && (
+        isDocOwner() || 
+        isAdmin() || 
+        (resource.data.sharedWith != null && (
+          resource.data.sharedWith.admin.hasAny([request.auth.token.email]) || 
+          resource.data.sharedWith.investor.hasAny([request.auth.token.email]) || 
+          resource.data.sharedWith.public.hasAny([request.auth.token.email])
+        ))
+      );
+      // Allow list for authenticated users to find funds they have access to
+      allow list: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidFund(request.resource.data) && isOwner(request.resource.data.userId);
+      allow update: if (isDocOwner() || isAdmin() || (resource.data.sharedWith != null && (resource.data.sharedWith.admin.hasAny([request.auth.token.email]) || resource.data.sharedWith.investor.hasAny([request.auth.token.email]) || resource.data.sharedWith.public.hasAny([request.auth.token.email])))) && isValidFund(request.resource.data) && areImmutableFieldsUnchanged(['userId', 'createdAt']);
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /investors/{investorId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin() || canReadFund(resource.data.fundId));
+      allow create: if isAuthenticated() && isValidInvestor(request.resource.data) && isOwner(request.resource.data.userId);
+      allow update: if isDocOwner() && isValidInvestor(request.resource.data) && areImmutableFieldsUnchanged(['userId', 'createdAt', 'fundId']);
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /ledger/{transactionId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin() || canReadFund(resource.data.fundId));
+      allow create: if isAuthenticated() && isValidCapitalTransaction(request.resource.data) && isOwner(request.resource.data.userId);
+      allow update: if isDocOwner() && isValidCapitalTransaction(request.resource.data) && areImmutableFieldsUnchanged(['userId', 'createdAt', 'fundId', 'investorId']);
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /trades/{tradeId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin() || canReadFund(resource.data.fundId));
+      allow create: if isAuthenticated() && isValidTrade(request.resource.data) && isOwner(request.resource.data.userId);
+      allow update: if isDocOwner() && isValidTrade(request.resource.data) && areImmutableFieldsUnchanged(['userId', 'createdAt', 'fundId']);
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /assets/{assetId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin() || canReadFund(resource.data.fundId));
+      allow create: if isAuthenticated() && isValidAsset(request.resource.data) && isOwner(request.resource.data.userId);
+      allow update: if isDocOwner() && isValidAsset(request.resource.data) && areImmutableFieldsUnchanged(['userId', 'createdAt', 'fundId']);
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isOwner(userId) && request.resource.data.role == 'user';
+      allow update: if isOwner(userId) && request.resource.data.role == resource.data.role;
+      allow delete: if isAdmin();
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

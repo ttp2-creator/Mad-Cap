@@ -1,0 +1,120 @@
+{
+  "entities": {
+    "Fund": {
+      "title": "Fund",
+      "description": "An investment fund with AUM and units.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "totalAum": { "type": "number" },
+        "totalUnits": { "type": "number" },
+        "navPerUnit": { "type": "number" },
+        "cashBalance": { "type": "number" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "name", "totalAum", "totalUnits", "navPerUnit", "cashBalance", "userId", "createdAt"]
+    },
+    "Investor": {
+      "title": "Investor",
+      "description": "An investor in the fund.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fundId": { "type": "string" },
+        "name": { "type": "string" },
+        "capitalInvested": { "type": "number" },
+        "unitsOwned": { "type": "number" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "fundId", "name", "capitalInvested", "unitsOwned", "userId", "createdAt"]
+    },
+    "CapitalTransaction": {
+      "title": "CapitalTransaction",
+      "description": "A ledger entry for capital movements.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fundId": { "type": "string" },
+        "investorId": { "type": "string" },
+        "investorName": { "type": "string" },
+        "type": { "type": "string", "enum": ["deposit", "withdrawal", "reval"] },
+        "amount": { "type": "number" },
+        "preNav": { "type": "number" },
+        "preUnits": { "type": "number" },
+        "unitPrice": { "type": "number" },
+        "unitsIssued": { "type": "number" },
+        "postUnits": { "type": "number" },
+        "postNav": { "type": "number" },
+        "date": { "type": "number" },
+        "notes": { "type": "string" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "fundId", "investorId", "investorName", "type", "amount", "preNav", "preUnits", "unitPrice", "unitsIssued", "postUnits", "postNav", "date", "userId", "createdAt"]
+    },
+    "Trade": {
+      "title": "Trade",
+      "description": "A record of a trade executed by the fund.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fundId": { "type": "string" },
+        "ticker": { "type": "string" },
+        "side": { "type": "string", "enum": ["buy", "sell"] },
+        "shares": { "type": "number" },
+        "price": { "type": "number" },
+        "notional": { "type": "number" },
+        "cashImpact": { "type": "number" },
+        "realizedPnL": { "type": "number" },
+        "date": { "type": "number" },
+        "notes": { "type": "string" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "fundId", "ticker", "side", "shares", "price", "notional", "cashImpact", "realizedPnL", "date", "userId", "createdAt"]
+    },
+    "Asset": {
+      "title": "Asset",
+      "description": "A holding in the fund's portfolio.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fundId": { "type": "string" },
+        "ticker": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "amount": { "type": "number" },
+        "costBasis": { "type": "number" },
+        "price": { "type": "number" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "fundId", "ticker", "name", "type", "amount", "costBasis", "price", "userId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/funds/{fundId}": {
+      "schema": "Fund",
+      "description": "Investment funds."
+    },
+    "/investors/{investorId}": {
+      "schema": "Investor",
+      "description": "Fund investors."
+    },
+    "/ledger/{transactionId}": {
+      "schema": "CapitalTransaction",
+      "description": "Capital transaction ledger."
+    },
+    "/trades/{tradeId}": {
+      "schema": "Trade",
+      "description": "Fund trade history."
+    },
+    "/assets/{assetId}": {
+      "schema": "Asset",
+      "description": "Fund portfolio holdings."
+    }
+  }
+}
