@@ -1,0 +1,30 @@
+name: Daily Fund Snapshot
+
+on:
+  schedule:
+    # Runs at 20:30 UTC every weekday (4:30 PM EST)
+    - cron: '30 20 * * 1-5'
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install firebase-admin requests
+
+      - name: Run Snapshot Script
+          # The script will look for FIREBASE_SERVICE_ACCOUNT_JSON first
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: python scripts/auto_snapshot.py

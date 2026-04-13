@@ -25,35 +25,53 @@ import Ledger from "./components/Ledger";
 import Trades from "./components/Trades";
 import Settings from "./components/Settings";
 import Auth from "./components/Auth";
-import { Fund, Investor, CapitalTransaction, Trade, Asset } from "./types";
+import History from "./components/History";
+import { Fund, Investor, LedgerEntry, Trade, Asset, FundSnapshot } from "./types";
 
 export default function App() {
   const [user, setUser] = React.useState<User | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
   const [activeTab, setActiveTab] = React.useState("dashboard");
   const [isAuthReady, setIsAuthReady] = React.useState(false);
+  const [theme, setTheme] = React.useState<"light" | "dark">(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem("mad-capital-theme");
+      return (saved as "light" | "dark") || "dark";
+    }
+    return "dark";
+  });
+
+  // Apply theme
+  React.useEffect(() => {
+    const root = window.document.documentElement;
+    root.classList.remove("light", "dark");
+    root.classList.add(theme);
+    localStorage.setItem("mad-capital-theme", theme);
+  }, [theme]);
+
 
   // Data state
   const [funds, setFunds] = React.useState<Fund[]>([]);
   const [investors, setInvestors] = React.useState<Investor[]>([]);
-  const [ledger, setLedger] = React.useState<CapitalTransaction[]>([]);
+  const [ledger, setLedger] = React.useState<LedgerEntry[]>([]);
   const [trades, setTrades] = React.useState<Trade[]>([]);
   const [assets, setAssets] = React.useState<Asset[]>([]);
+  const [snapshots, setSnapshots] = React.useState<FundSnapshot[]>([]);
 
   const activeFund = React.useMemo(() => {
     // Prioritize fund administered by ttp2@fordham.edu
-    const adminFund = funds.find(f => f.sharedWith?.admin?.includes("ttp2@fordham.edu"));
-    return adminFund || funds[0];
+    const pmFund = funds.find(f => f.sharedWith?.pm?.includes("ttp2@fordham.edu"));
+    return pmFund || funds[0];
   }, [funds]);
 
   const userRole = React.useMemo(() => {
     if (!user) return null;
-    if (user.email === "ttp2@fordham.edu") return 'admin';
+    if (user.email === "ttp2@fordham.edu") return 'PM';
     if (!activeFund) return null;
-    if (activeFund.userId === user.uid) return 'admin';
-    if (activeFund.sharedWith?.admin?.includes(user.email || "")) return 'admin';
-    if (activeFund.sharedWith?.investor?.includes(user.email || "")) return 'investor';
-    if (activeFund.sharedWith?.public?.includes(user.email || "")) return 'public';
+    if (activeFund.userId === user.uid) return 'PM';
+    if (activeFund.sharedWith?.pm?.includes(user.email || "")) return 'PM';
+    if (activeFund.sharedWith?.analyst?.includes(user.email || "")) return 'Analyst';
+    if (activeFund.sharedWith?.public?.includes(user.email || "")) return 'Public';
     return null;
   }, [user, activeFund]);
 
@@ -76,11 +94,11 @@ export default function App() {
       const fetchedFunds = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Fund))
         .filter(fund => {
           const isOwner = fund.userId === user.uid;
-          const isAdmin = fund.sharedWith?.admin?.includes(user.email || "");
-          const isInvestor = fund.sharedWith?.investor?.includes(user.email || "");
+          const isPM = fund.sharedWith?.pm?.includes(user.email || "");
+          const isAnalyst = fund.sharedWith?.analyst?.includes(user.email || "");
           const isPublic = fund.sharedWith?.public?.includes(user.email || "");
-          console.log("Checking fund:", fund.name, "Owner:", isOwner, "Admin:", isAdmin, "Investor:", isInvestor, "Public:", isPublic, "User Email:", user.email);
-          return isOwner || isAdmin || isInvestor || isPublic;
+          console.log("Checking fund:", fund.name, "Owner:", isOwner, "PM:", isPM, "Analyst:", isAnalyst, "Public:", isPublic, "User Email:", user.email);
+          return isOwner || isPM || isAnalyst || isPublic;
         });
       console.log("Fetched funds:", fetchedFunds);
       setFunds(fetchedFunds);
@@ -99,13 +117,14 @@ export default function App() {
     const ledgerQuery = query(collection(db, "ledger"), where("fundId", "==", activeFund.id));
     const tradeQuery = query(collection(db, "trades"), where("fundId", "==", activeFund.id));
     const assetQuery = query(collection(db, "assets"), where("fundId", "==", activeFund.id));
+    const snapshotQuery = query(collection(db, "fund_snapshots"), where("fundId", "==", activeFund.id));
 
     const unsubInvestors = onSnapshot(investorQuery, (snapshot) => {
       setInvestors(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Investor)));
     }, (error) => handleFirestoreError(error, OperationType.LIST, "investors"));
 
     const unsubLedger = onSnapshot(ledgerQuery, (snapshot) => {
-      setLedger(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as CapitalTransaction)));
+      setLedger(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as LedgerEntry)));
     }, (error) => handleFirestoreError(error, OperationType.LIST, "ledger"));
 
     const unsubTrades = onSnapshot(tradeQuery, (snapshot) => {
@@ -116,11 +135,16 @@ export default function App() {
       setAssets(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Asset)));
     }, (error) => handleFirestoreError(error, OperationType.LIST, "assets"));
 
+    const unsubSnapshots = onSnapshot(snapshotQuery, (snapshot) => {
+      setSnapshots(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as FundSnapshot)));
+    }, (error) => handleFirestoreError(error, OperationType.LIST, "snapshots"));
+
     return () => {
       unsubInvestors();
       unsubLedger();
       unsubTrades();
       unsubAssets();
+      unsubSnapshots();
     };
   }, [user, isAuthReady, activeFund]);
 
@@ -157,25 +181,25 @@ export default function App() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-[#E4E3E0] flex items-center justify-center font-mono text-sm uppercase tracking-widest animate-pulse">
-        Initializing Mad Capital...
+      <div className="min-h-screen bg-bg-primary flex items-center justify-center font-mono text-[10px] uppercase tracking-[0.4em] text-text-secondary animate-pulse px-10 text-center">
+        INITIALIZING MAD CAPITAL TERMINAL V2.4.0...
       </div>
     );
   }
 
   if (!user) {
-    return <Auth onLogin={handleLogin} isLoading={isLoading} />;
+    return <Auth />;
   }
 
   if (userRole === null) {
     return (
-      <div className="min-h-screen bg-[#E4E3E0] flex flex-col items-center justify-center font-mono text-sm uppercase tracking-widest">
-        <p className="mb-4">Access Denied</p>
+      <div className="min-h-screen bg-bg-primary flex flex-col items-center justify-center font-mono text-[10px] uppercase tracking-[0.2em] text-text-secondary">
+        <p className="mb-8 border border-danger/30 bg-danger/5 px-6 py-3 text-danger font-bold">SECURE GATEWAY: ACCESS_DENIED</p>
         <button 
           onClick={handleLogout}
-          className="bg-[#141414] text-[#E4E3E0] px-6 py-3 rounded-xl font-bold text-sm hover:scale-105 transition-transform"
+          className="bg-accent text-bg-primary px-8 py-3 font-bold text-[10px] hover:bg-accent-hover transition-all uppercase tracking-[0.3em]"
         >
-          Sign Out
+          SIGNOUT / DISCONNECT
         </button>
       </div>
     );
@@ -195,6 +219,8 @@ export default function App() {
           fund={activeFund}
           investors={investors}
           assets={assets}
+          ledger={ledger}
+          snapshots={snapshots}
           userRole={userRole}
         />
       )}
@@ -202,7 +228,6 @@ export default function App() {
         <Portfolio 
           assets={assets} 
           fund={activeFund}
-          userId={user.uid}
           userRole={userRole}
         />
       )}
@@ -210,17 +235,14 @@ export default function App() {
         <Investors 
           investors={investors} 
           fund={activeFund}
-          userId={user.uid}
           userRole={userRole}
         />
       )}
       {activeTab === "ledger" && userRole && (
         <Ledger 
           ledger={ledger} 
-          investors={investors}
-          assets={assets}
           fund={activeFund}
-          userId={user.uid}
+          investors={investors}
           userRole={userRole}
         />
       )}
@@ -229,15 +251,22 @@ export default function App() {
           trades={trades} 
           assets={assets}
           fund={activeFund}
-          userId={user.uid}
+          userRole={userRole}
+        />
+      )}
+      {activeTab === "history" && userRole && (
+        <History
+          fund={activeFund}
+          snapshots={snapshots}
           userRole={userRole}
         />
       )}
       {activeTab === "settings" && (
         <Settings 
-          user={user}
           fund={activeFund}
-          userRole={userRole}
+          userId={user.uid}
+          theme={theme}
+          onThemeChange={setTheme}
         />
       )}
     </Layout>

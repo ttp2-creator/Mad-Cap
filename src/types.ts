@@ -1,3 +1,5 @@
+export type UserRole = "PM" | "Analyst" | "Public";
+
 export type Fund = {
   id: string;
   name: string;
@@ -6,8 +8,13 @@ export type Fund = {
   navPerUnit: number;
   cashBalance: number;
   userId: string;
-  sharedWith?: { admin: string[]; investor: string[]; public: string[] };
+  sharedWith?: { 
+    pm: string[];       // Portfolio Managers
+    analyst: string[];   // Analysts
+    public: string[];    // Public Viewers
+  };
   createdAt: number;
+  updatedAt?: number;
 };
 
 export type Investor = {
@@ -23,7 +30,7 @@ export type Investor = {
 
 export type CapitalTransactionType = "deposit" | "withdrawal" | "reval";
 
-export type CapitalTransaction = {
+export type LedgerEntry = {
   id: string;
   fundId: string;
   investorId: string;
@@ -49,7 +56,7 @@ export type Trade = {
   fundId: string;
   ticker: string;
   side: TradeSide;
-  shares: number;
+  amount: number;
   price: number;
   notional: number;
   cashImpact: number;
@@ -59,6 +66,18 @@ export type Trade = {
   userId: string;
   createdAt: number;
 };
+
+export interface FundSnapshot {
+  id: string;
+  fundId: string;
+  date: number; // Unix timestamp
+  totalAum: number;
+  totalUnits: number;
+  navPerUnit: number;
+  spyValue: number;
+  dailyPnl: number;
+  createdAt: number;
+}
 
 export type Asset = {
   id: string;
@@ -72,4 +91,5 @@ export type Asset = {
   userId: string;
   date?: number;
   createdAt: number;
+  updatedAt?: number;
 };
