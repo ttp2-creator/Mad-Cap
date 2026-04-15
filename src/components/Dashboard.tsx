@@ -1,75 +1,158 @@
 import React from "react";
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
-  AreaChart, Area, PieChart, Pie, Cell 
+  AreaChart, Area, PieChart, Pie, Cell, ReferenceLine 
 } from "recharts";
 import { TrendingUp, TrendingDown, ArrowUpRight, ArrowDownRight, RefreshCw, Database, Layers, Activity } from "lucide-react";
 import { cn } from "@/src/lib/utils";
-import { Asset, Fund, Investor, LedgerEntry, FundSnapshot } from "@/src/types";
-import { doc, updateDoc } from "firebase/firestore";
+import { Asset, Fund, Investor, LedgerEntry, FundSnapshot, Trade } from "@/src/types";
+import { doc, updateDoc, deleteDoc } from "firebase/firestore";
 import { db, handleFirestoreError, OperationType } from "@/src/firebase";
-import { fetchStockQuote, fetchCompanyProfile } from "@/src/lib/finnhub";
+import { StockQuote, fetchStockQuote, fetchCompanyProfile } from "@/src/lib/finnhub";
+import { fetchBenchmarkData } from "@/src/lib/yahoo";
+import { DashboardCard } from "./DashboardCard";
+import { AllocationDonuts } from "./AllocationDonuts";
+import { HoldingsTable } from "./HoldingsTable";
+import { PortfolioMovers } from "./PortfolioMovers";
+import { formatCurrency, formatCompact, formatPrice } from "../lib/NumberUtils";
+import { ProjectedIncome } from "./ProjectedIncome";
+import { InvestmentThemes } from "./InvestmentThemes";
 
 interface DashboardProps {
   fund?: Fund;
   investors: Investor[];
   assets: Asset[];
   ledger: LedgerEntry[];
+  trades?: Trade[];
   snapshots: FundSnapshot[];
   userRole: 'PM' | 'Analyst' | 'Public';
 }
 
-export default function Dashboard({ fund, investors, assets, ledger, snapshots, userRole }: DashboardProps) {
+const CustomTooltip = ({ active, payload, label, benchmarkTicker, chartView }: any) => {
+  if (active && payload && payload.length) {
+    const data = payload[0].payload;
+    const isPerf = chartView === 'performance';
+    
+    return (
+      <div className="bg-white border border-border p-3 rounded-lg shadow-xl text-[10px] min-w-[150px] animate-in fade-in zoom-in-95 duration-200">
+        <p className="font-bold text-text-primary mb-2 pb-1 border-b border-border">{label}</p>
+        <div className="space-y-1.5">
+          <div className="flex justify-between items-center gap-4">
+            <span className="text-text-secondary font-medium uppercase tracking-tighter">Fund</span> 
+            <span className="font-bold text-text-primary tabular-nums">
+              {isPerf 
+                ? `${(data.cumReturn >= 0 ? '+' : '')}${data.cumReturn.toFixed(2)}%`
+                : `$${Number(data.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              }
+            </span>
+          </div>
+          
+          {data.spy !== undefined && (
+            <div className="flex justify-between items-center gap-4 pt-1.5 border-t border-border/50">
+              <span className="text-purple-600 font-medium uppercase tracking-tighter">{benchmarkTicker}</span>
+              <span className="font-bold text-purple-700 tabular-nums">
+                {isPerf
+                  ? `${(data.spy >= 0 ? '+' : '')}${Number(data.spy).toFixed(2)}%`
+                  : `$${Number(data.spy).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                }
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
+
+export default function Dashboard({ fund, investors, assets, ledger, trades = [], snapshots, userRole }: DashboardProps) {
   const isAnalystOrAbove = userRole === 'PM' || userRole === 'Analyst';
   if (!fund) return <div className="p-10 text-center text-text-secondary animate-pulse uppercase tracking-widest text-xs">LOADING...</div>;
 
   const isPublic = userRole === 'Public';
-  const totalAssetMarketValue = assets.reduce((sum, asset) => sum + (asset.amount * asset.price), 0);
+  
+  // Enrich assets for DEMO if data is missing
+  const enrichedAssets = React.useMemo(() => {
+    return assets.map(asset => {
+      const a = { ...asset };
+      if (!a.dividendYield) {
+        if (["SPY", "IVV", "VOO"].includes(a.ticker)) { a.dividendYield = 0.013; a.dividendMonths = [2, 5, 8, 11]; }
+        if (["SCHD", "VYM"].includes(a.ticker)) { a.dividendYield = 0.035; a.dividendMonths = [2, 5, 8, 11]; }
+        if (["AAPL", "MSFT"].includes(a.ticker)) { a.dividendYield = 0.006; a.dividendMonths = [1, 4, 7, 10]; }
+        if (["JPM", "BAC"].includes(a.ticker)) { a.dividendYield = 0.025; a.dividendMonths = [0, 3, 6, 9]; }
+      }
+      if (!a.themes || a.themes.length === 0) {
+        if (["AAPL", "MSFT", "NVDA"].includes(a.ticker)) a.themes = ["MegaCap Tech", "AI Infrastructure"];
+        if (["SPY", "VTI"].includes(a.ticker)) a.themes = ["Broad Market", "Value Investing"];
+        if (["GLD", "SLV"].includes(a.ticker)) a.themes = ["Gold/Commodities", "Inflation Hedge"];
+        if (["TSLA"].includes(a.ticker)) a.themes = ["EV/Growth", "Automation"];
+      }
+      return a;
+    });
+  }, [assets]);
+
+  const totalAssetMarketValue = enrichedAssets.reduce((sum, asset) => sum + (asset.amount * asset.price), 0);
   const totalValue = totalAssetMarketValue + fund.cashBalance;
   const calculatedNav = fund.totalUnits > 0 ? totalValue / fund.totalUnits : 10;
+  
+  const unrealizedPnL = assets.reduce((sum, asset) => sum + ((asset.amount * (asset.price || 0)) - (asset.costBasis || 0)), 0);
+  const realizedPnL = trades.reduce((sum, t) => sum + (t.realizedPnL || 0), 0);
   const [isRefreshing, setIsRefreshing] = React.useState(false);
   const [tickerLogos, setTickerLogos] = React.useState<Record<string, string>>({});
+  const [tickerNames, setTickerNames] = React.useState<Record<string, string>>({});
+  const [stockQuotes, setStockQuotes] = React.useState<Record<string, StockQuote>>({});
   
   const [spyData, setSpyData] = React.useState<{date: string, timestamp: number, value: number}[]>([]);
   const [compareEnabled, setCompareEnabled] = React.useState(false);
-  const [timeHorizon, setTimeHorizon] = React.useState('ALL');
+  const [benchmarkTicker, setBenchmarkTicker] = React.useState("SPY");
+  const [timeHorizon, setTimeHorizon] = React.useState('1M');
+  const [chartView, setChartView] = React.useState<'performance' | 'value'>('performance');
+  const [calcMethod, setCalcMethod] = React.useState<'TWR'|'MWR'>('TWR');
+  const activeAssets = React.useMemo(() => assets.filter(a => a.ticker !== 'CASH' && a.amount > 0.000001), [assets]);
 
   React.useEffect(() => {
-    // Fetch SPY historical data for comparison
-    const fetchSPY = async () => {
-      try {
-        const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=2y`);
-        const data = await res.json();
-        const timestamps = data.chart.result[0].timestamp;
-        const closes = data.chart.result[0].indicators.quote[0].close;
-        const history = timestamps.map((t: number, i: number) => ({
-          date: new Date(t * 1000).toLocaleDateString([], { month: 'short', day: '2-digit' }),
-          timestamp: t * 1000,
-          value: closes[i]
-        })).filter((x: any) => x.value !== null);
-        setSpyData(history);
-      } catch (e) {
-        console.error("Failed to fetch SPY benchmark", e);
-      }
+    const loadBenchmark = async () => {
+      const history = await fetchBenchmarkData(benchmarkTicker, '2y');
+      setSpyData(history);
     };
-    fetchSPY();
-  }, []);
+    if (benchmarkTicker && compareEnabled) {
+      loadBenchmark();
+    }
+  }, [benchmarkTicker, compareEnabled]);
 
-  // Fetch logos
   React.useEffect(() => {
-    const fetchLogos = async () => {
+    let active = true;
+    const fetchLogosQuotes = async () => {
       const logos: Record<string, string> = {};
-      for (const asset of assets) {
-        if (asset.ticker && !tickerLogos[asset.ticker]) {
-          const profile = await fetchCompanyProfile(asset.ticker);
-          if (profile?.logo) logos[asset.ticker] = profile.logo;
+      const names: Record<string, string> = {};
+      const quotes: Record<string, StockQuote> = {};
+      
+      const settledAssets = assets.filter(a => a.ticker !== 'CASH' && a.amount > 0);
+      
+      for (const asset of settledAssets) {
+        if (!active) break;
+        if (!tickerLogos[asset.ticker]) {
+           try {
+             const profile = await fetchCompanyProfile(asset.ticker);
+             if (profile?.logo) logos[asset.ticker] = profile.logo;
+             if (profile?.name) names[asset.ticker] = profile.name;
+             
+             const q = await fetchStockQuote(asset.ticker);
+             if (q) quotes[asset.ticker] = q;
+             
+             // Throttle Finnhub requests
+             await new Promise(r => setTimeout(r, 100));
+           } catch(e) {}
         }
       }
-      if (Object.keys(logos).length > 0) {
-        setTickerLogos(prev => ({ ...prev, ...logos }));
+      if (active) {
+        if (Object.keys(logos).length > 0) setTickerLogos(prev => ({ ...prev, ...logos }));
+        if (Object.keys(names).length > 0) setTickerNames(prev => ({ ...prev, ...names }));
+        if (Object.keys(quotes).length > 0) setStockQuotes(prev => ({ ...prev, ...quotes }));
       }
     };
-    fetchLogos();
+    fetchLogosQuotes();
+    return () => { active = false; };
   }, [assets]);
 
   const handleRevalue = async () => {
@@ -81,6 +164,12 @@ export default function Dashboard({ fund, investors, assets, ledger, snapshots, 
       // 1. Fetch fresh quotes for all assets
       for (const asset of assets) {
         if (asset.ticker && asset.ticker !== 'CASH') {
+          if (asset.amount <= 0.000001) {
+             try {
+                await deleteDoc(doc(db, "assets", asset.id));
+             } catch(e) { console.error("Error sweeping zero asset", e); }
+             continue;
+          }
           const quote = await fetchStockQuote(asset.ticker);
           if (quote) {
             const assetRef = doc(db, "assets", asset.id);
@@ -113,14 +202,17 @@ export default function Dashboard({ fund, investors, assets, ledger, snapshots, 
 
   // Real Performance Data from Snapshots
   const performanceData = React.useMemo(() => {
-    if (!snapshots || snapshots.length === 0) return [];
+    if (!snapshots || snapshots.length === 0) return { dataPoints: [], baseNav: 10 };
 
     let startDate = 0;
     const now = Date.now();
-    if (timeHorizon === '1M') startDate = now - 30 * 24 * 60 * 60 * 1000;
+    if (timeHorizon === '7D') startDate = now - 7 * 24 * 60 * 60 * 1000;
+    else if (timeHorizon === '1M') startDate = now - 30 * 24 * 60 * 60 * 1000;
     else if (timeHorizon === '3M') startDate = now - 90 * 24 * 60 * 60 * 1000;
     else if (timeHorizon === '6M') startDate = now - 180 * 24 * 60 * 60 * 1000;
     else if (timeHorizon === 'YTD') startDate = new Date(new Date().getFullYear(), 0, 1).getTime();
+    else if (timeHorizon === '1Y') startDate = now - 365 * 24 * 60 * 60 * 1000;
+    else if (timeHorizon === 'MTD') startDate = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
 
     const sortedSnapshots = [...snapshots].sort((a, b) => a.date - b.date);
 
@@ -137,6 +229,7 @@ export default function Dashboard({ fund, investors, assets, ledger, snapshots, 
     if (entriesInTimeframe.length === 0 && sortedSnapshots.length > 0) {
        startOfDay = new Date(sortedSnapshots[sortedSnapshots.length - 1].date).setHours(0,0,0,0);
     }
+    const baseNav = entriesInTimeframe.length > 0 ? entriesInTimeframe[0].navPerUnit : (sortedSnapshots.length > 0 ? sortedSnapshots[sortedSnapshots.length - 1].navPerUnit : 10);
 
     const dataPoints = [];
     let currentNav = sortedSnapshots[0]?.navPerUnit || 10;
@@ -146,38 +239,42 @@ export default function Dashboard({ fund, investors, assets, ledger, snapshots, 
     const baseSpy = baseSpyItem ? baseSpyItem.value : 0;
     lastSpy = baseSpy;
 
-    let snapIdx = 0;
-    for (let t = startOfDay; t <= endOfDay; t += MS_PER_DAY) {
-       while(snapIdx < sortedSnapshots.length && sortedSnapshots[snapIdx].date <= t + MS_PER_DAY - 1) {
-          currentNav = sortedSnapshots[snapIdx].navPerUnit;
-          snapIdx++;
-       }
+     let snapIdx = 0;
+     for (let t = startOfDay; t <= endOfDay; t += MS_PER_DAY) {
+        while(snapIdx < sortedSnapshots.length && sortedSnapshots[snapIdx].date <= t + MS_PER_DAY - 1) {
+           currentNav = sortedSnapshots[snapIdx].navPerUnit;
+           snapIdx++;
+        }
 
-       const daySpy = spyData.find(s => {
-          const sDate = new Date(s.timestamp).setHours(0,0,0,0);
-          return sDate === t;
-       });
-       if (daySpy) {
-          lastSpy = daySpy.value;
-       }
+        const daySpy = spyData.find(s => {
+           const sDate = new Date(s.timestamp).setHours(0,0,0,0);
+           return sDate === t;
+        });
+        if (daySpy) {
+           lastSpy = daySpy.value;
+        }
 
-       let spyVal = undefined;
-       const bn = dataPoints.length > 0 ? dataPoints[0].value : currentNav;
-       if (compareEnabled && baseSpy > 0 && lastSpy > 0) {
-          const pctChange = (lastSpy - baseSpy) / baseSpy;
-          spyVal = bn * (1 + pctChange);
-       }
+        let spyVal = undefined;
+        let spyPercent = undefined;
+        
+        if (compareEnabled && baseSpy > 0 && lastSpy > 0) {
+           const pctChange = (lastSpy - baseSpy) / baseSpy;
+           spyPercent = pctChange * 100;
+           // If we're in 'value' mode, we index SPY to the Fund's baseNav
+           spyVal = baseNav * (1 + pctChange);
+        }
 
-       dataPoints.push({
-         name: new Date(t).toLocaleDateString([], { month: 'short', day: '2-digit' }),
-         timestamp: t,
-         value: Number(currentNav || 0),
-         spy: spyVal
-       });
-    }
+        dataPoints.push({
+          name: new Date(t).toLocaleDateString([], { month: 'short', day: '2-digit' }),
+          timestamp: t,
+          value: Number(currentNav || 0),
+          spy: chartView === 'performance' ? spyPercent : spyVal,
+          cumReturn: ((Number(currentNav || 0) - baseNav) / baseNav) * 100
+        });
+     }
 
-    return dataPoints;
-  }, [snapshots, timeHorizon, spyData, compareEnabled]);
+    return { dataPoints, baseNav };
+  }, [snapshots, timeHorizon, spyData, compareEnabled, benchmarkTicker]);
 
   const previousSnapshot = React.useMemo(() => {
      if (!snapshots || snapshots.length === 0) return null;
@@ -194,240 +291,361 @@ export default function Dashboard({ fund, investors, assets, ledger, snapshots, 
   
   const aumPercent = yesterdayAUM > 0 ? ((totalValue - yesterdayAUM) / yesterdayAUM) * 100 : 0;
 
-  // Individual Equities Allocation
-  const assetAllocation = React.useMemo(() => {
-    const COLORS = [
-      "var(--color-accent)", "#6366f1", "#8b5cf6", "#ec4899", 
-      "#f97316", "#eab308", "#10b981", "#06b6d4"
-    ];
+  // Advanced NAV Metrics
+  const advancedNavMetrics = React.useMemo(() => {
+    const data = performanceData.dataPoints;
+    if (!data.length) return { bestDay: {date:'', return:0}, worstDay: {date:'', return:0}, netCapitalFlow: 0, changeAmount: 0, changePercent: 0, beginNav: 0, endNav: 0, label: "" };
     
-    const equityItems = assets
-      .filter(a => a.ticker !== 'CASH' && a.amount > 0)
-      .map((a, i) => ({
-        name: a.ticker,
-        value: a.amount * a.price,
-        color: COLORS[i % COLORS.length]
-      }));
+    const beginNav = performanceData.baseNav;
+    const endNav = data[data.length - 1].value;
+    const changeAmount = endNav - beginNav;
+    const changePercent = beginNav > 0 ? (changeAmount / beginNav) * 100 : 0;
     
-    if (fund.cashBalance > 0) {
-      equityItems.push({
-        name: "CASH",
-        value: fund.cashBalance,
-        color: "#10b981"
-      });
+    let bestDay = { date: '', return: -Infinity };
+    let worstDay = { date: '', return: Infinity };
+    
+    // Calculate daily ranges
+    let prevVal = beginNav;
+    for (let i = 0; i < data.length; i++) {
+       const dailyRet = prevVal > 0 ? ((data[i].value - prevVal) / prevVal) * 100 : 0;
+       if (dailyRet > bestDay.return) bestDay = { date: data[i].name, return: dailyRet };
+       if (dailyRet < worstDay.return) worstDay = { date: data[i].name, return: dailyRet };
+       prevVal = data[i].value;
     }
+    if (bestDay.return === -Infinity) bestDay.return = 0;
+    if (worstDay.return === Infinity) worstDay.return = 0;
     
-    return equityItems.sort((a, b) => b.value - a.value);
-  }, [assets, fund.cashBalance]);
+    // Ledger Deposits and Withdrawals for the timeframe
+    const startTimeStamp = data[0].timestamp;
+    const dwFlows = ledger.filter(l => l.date >= startTimeStamp && (l.type === 'deposit' || l.type === 'withdrawal'));
+    const netCapitalFlow = dwFlows.reduce((sum, item) => sum + (item.type === 'deposit' ? item.amount : -item.amount), 0);
+    
+    const label = `${data[0].name} – ${data[data.length - 1].name}`;
 
-  const topPositions = assets
-    .filter(a => a.ticker !== 'CASH' && a.amount > 0)
-    .sort((a, b) => (b.amount * b.price) - (a.amount * a.price))
-    .slice(0, 6);
+    return {
+       bestDay, worstDay, netCapitalFlow, changeAmount, changePercent, beginNav, endNav, label
+    };
+  }, [performanceData, ledger]);
+
+  // Removed old Individual Equities Allocation logic and TopPositions logic
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
-      {/* Revised Institutional Header */}
-      <div className="flex items-end justify-between border-b border-border pb-4">
-        <div className="text-left">
-          <h2 className="text-xl font-bold tracking-tight text-text-primary mb-1 uppercase">DASHBOARD</h2>
-          <p className="text-[10px] text-text-secondary uppercase tracking-[0.2em] font-medium">MAD CAPITAL | RECONCILED</p>
+    <div className="flex flex-col xl:flex-row gap-10 animate-in fade-in slide-in-from-bottom-4 duration-1000">
+      
+      {/* Primary Content Column */}
+      <div className="flex-1 space-y-10 min-w-0">
+        
+        {/* Functional Actions Row */}
+        <div className="flex justify-end border-b border-border pb-6">
+           {userRole === 'PM' && (
+             <button 
+               onClick={handleRevalue}
+               className="px-6 py-2 bg-accent text-white text-[11px] font-black hover:bg-accent-hover transition-all rounded-sm shadow-sm flex items-center gap-2 uppercase tracking-widest"
+             >
+               <RefreshCw size={12} className={cn(isRefreshing && "animate-spin")} />
+               {isRefreshing ? 'SYNCING...' : 'SYNC ALL QUOTES'}
+             </button>
+           )}
         </div>
-        <div className="flex gap-2">
-          {userRole === 'PM' && (
-            <button 
-              onClick={handleRevalue}
-              title="EXECUTE GLOBAL REVALUATION"
-              className="flex items-center justify-center bg-surface hover:bg-surface/80 border border-border w-8 h-8 transition-all text-text-primary uppercase tracking-widest shrink-0 shadow-inner"
-            >
-              <RefreshCw size={14} className={cn(isRefreshing && "animate-spin")} />
-            </button>
-          )}
-        </div>
-      </div>
 
-      {/* High-Density Stats Bar */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {[
-          { label: "AUM", value: `$${(totalValue || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, change: `${aumPercent >= 0 ? '+' : ''}${aumPercent.toFixed(2)}%`, status: aumPercent >= 0 ? "success" : "danger" },
-          { label: "NAV", value: `$${(Number(calculatedNav) || 0).toFixed(4)}`, change: `${dailyPnlPercent >= 0 ? '+' : ''}${dailyPnlPercent.toFixed(2)}%`, status: dailyPnlPercent >= 0 ? "success" : "danger" },
-          { label: "DAILY P&L", value: `${dailyPnlDollar >= 0 ? '+' : ''}$${Math.abs(dailyPnlDollar).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, change: `${dailyPnlPercent >= 0 ? '+' : ''}${dailyPnlPercent.toFixed(2)}%`, status: dailyPnlPercent >= 0 ? "success" : "danger" },
-          { label: "BUYING POWER", value: `$${(fund.cashBalance || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, change: "---", status: "neutral" },
-        ].map((stat, i) => (
-          <div key={i} className="bg-bg-secondary p-4 border border-border relative overflow-hidden group">
-            <div className="absolute top-0 left-0 w-1 h-full bg-border group-hover:bg-accent transition-colors" />
-            <p className="text-[9px] text-text-secondary uppercase tracking-[0.15em] mb-2 font-bold text-left">{stat.label}</p>
-            <div className="flex items-end justify-between">
-              <h2 className="text-xl font-mono font-bold leading-none tracking-tight">{stat.value}</h2>
-              <span className={cn(
-                "text-[10px] font-mono px-1",
-                stat.status === "success" ? "text-success" : (stat.status === "danger" ? "text-danger" : "text-text-secondary")
-              )}>
-                {stat.change}
-              </span>
+        {/* High-Density Stats Bar: Primary Focus Metrics */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {[
+            { label: "AUM", value: formatCompact(totalValue), change: `${aumPercent >= 0 ? '+' : ''}${aumPercent.toFixed(2)}%`, status: aumPercent >= 0 ? "success" : "danger" },
+            { label: "NAV", value: formatPrice(Number(calculatedNav)), change: `${dailyPnlPercent >= 0 ? '+' : ''}${dailyPnlPercent.toFixed(2)}%`, status: dailyPnlPercent >= 0 ? "success" : "danger" },
+            { label: "Day P&L", value: `${dailyPnlDollar >= 0 ? '+' : ''}${formatCompact(Math.abs(dailyPnlDollar))}`, change: `${dailyPnlPercent >= 0 ? '+' : ''}${dailyPnlPercent.toFixed(2)}%`, status: dailyPnlPercent >= 0 ? "success" : "danger" },
+          ].map((stat, i) => (
+            <DashboardCard key={i} className="border-border/60 hover:shadow-md transition-shadow" bodyClassName="p-5">
+              <div className="flex flex-col h-full justify-between">
+                <div>
+                  <div className="text-[11px] font-bold uppercase tracking-widest text-text-muted mb-2 leading-none">{stat.label}</div>
+                  <div className="flex items-baseline justify-between">
+                    <h2 className="text-2xl font-black tracking-tight text-text-primary tabular-nums">{stat.value}</h2>
+                  </div>
+                </div>
+                <div className="mt-3 flex items-center justify-between">
+                   {stat.status !== "neutral" && stat.change !== "---" ? (
+                      <div className={cn("text-[11px] font-bold tabular-nums px-2 py-0.5 rounded-sm", stat.status === 'success' ? "bg-success/10 text-success" : "bg-danger/10 text-danger")}>
+                        {stat.change}
+                      </div>
+                   ) : <div className="text-[10px] text-text-muted font-medium italic">---</div>}
+                </div>
+              </div>
+            </DashboardCard>
+          ))}
+        </div>
+
+        {/* Main Grid: Performance & Advanced Panel */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+          {/* Real Performance Chart */}
+          <DashboardCard 
+            className="md:col-span-8" 
+            bodyClassName="p-0"
+          >
+            <div className="px-6 py-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+              <div className="flex items-start gap-8">
+                <div className="flex flex-col min-w-0">
+                  <span className="text-[10px] text-text-muted font-bold uppercase truncate tracking-tight">
+                    {chartView === 'performance' ? 'Cumulative Return' : 'Net Asset Value'}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-3xl font-black text-text-primary tracking-tighter">
+                      {chartView === 'performance' 
+                        ? `${(performanceData.dataPoints[performanceData.dataPoints.length - 1]?.cumReturn >= 0 ? '+' : '')}${performanceData.dataPoints[performanceData.dataPoints.length - 1]?.cumReturn.toFixed(2)}%`
+                        : formatPrice(performanceData.dataPoints[performanceData.dataPoints.length - 1]?.value || 0)
+                      }
+                    </span>
+                    {chartView === 'value' && (
+                      <div className={cn(
+                        "flex items-center font-bold text-lg",
+                        (performanceData.dataPoints[performanceData.dataPoints.length - 1]?.cumReturn >= 0) ? "text-success" : "text-danger"
+                      )}>
+                        {performanceData.dataPoints[performanceData.dataPoints.length - 1]?.cumReturn >= 0 ? <ArrowUpRight size={20} /> : <ArrowDownRight size={20} />}
+                        <span>{Math.abs(performanceData.dataPoints[performanceData.dataPoints.length - 1]?.cumReturn || 0).toFixed(2)}%</span>
+                      </div>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-text-muted font-bold uppercase mt-1">
+                    {chartView === 'performance' ? 'Time-Weighted Returns' : 'Market Value'} ({timeHorizon})
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-4 text-[10px] font-bold uppercase tracking-wider">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-3 h-0.5 bg-success" />
+                    <span>Performance TWR</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-text-muted">
+                    <div className="w-3 h-0.5 bg-purple-500" />
+                    <span>{benchmarkTicker}</span>
+                  </div>
+                </div>
+                <div className="flex bg-surface p-1 rounded-sm gap-1">
+                  <button 
+                    onClick={() => setChartView('performance')}
+                    className={cn(
+                      "px-3 py-1 text-[10px] font-bold rounded-sm transition-all",
+                      chartView === 'performance' ? "bg-white shadow-sm text-text-primary" : "text-text-muted hover:text-text-primary"
+                    )}
+                  >
+                    Performance
+                  </button>
+                  <button 
+                    onClick={() => setChartView('value')}
+                    className={cn(
+                      "px-3 py-1 text-[10px] font-bold rounded-sm transition-all",
+                      chartView === 'value' ? "bg-white shadow-sm text-text-primary" : "text-text-muted hover:text-text-primary"
+                    )}
+                  >
+                    Value
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
 
-      {/* Main Grid: Performance & Distribution */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Real Performance Chart */}
-        <div className="lg:col-span-8 bg-bg-secondary p-5 border border-border flex flex-col">
-          <div className="flex items-center justify-between mb-8 border-b border-border/50 pb-3">
-            <h3 className="text-xs font-bold uppercase tracking-widest text-text-secondary flex items-center gap-2">
-              <TrendingUp size={14} className="text-accent" />
-              NAV PERFORMANCE (IRR)
-            </h3>
-            <div className="flex gap-1 items-center">
-              <label className="flex items-center gap-1 mr-4 cursor-pointer text-[9px] font-mono text-text-secondary uppercase select-none">
-                <input 
-                  type="checkbox" 
-                  checked={compareEnabled} 
-                  onChange={(e) => setCompareEnabled(e.target.checked)}
-                  className="accent-accent"
-                />
-                VS SPY
-              </label>
-              {["1M", "3M", "6M", "YTD", "ALL"].map((p) => (
+            <div className="h-[260px] w-full px-2 pb-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={performanceData.dataPoints} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="var(--color-success)" stopOpacity={0.1}/>
+                      <stop offset="100%" stopColor="var(--color-success)" stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="0 0" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" hide />
+                  <YAxis 
+                    orientation="right" 
+                    axisLine={false} 
+                    tickLine={false} 
+                    tick={{ fontSize: 9, fill: "var(--color-text-muted)", fontWeight: 600 }} 
+                    domain={['auto', 'auto']}
+                    tickFormatter={(val) => chartView === 'performance' ? `${val}%` : `$${formatCompact(val)}`}
+                  />
+                  <Tooltip 
+                    content={<CustomTooltip benchmarkTicker={benchmarkTicker} chartView={chartView} />}
+                    cursor={{ stroke: 'var(--color-accent)', strokeWidth: 1, strokeDasharray: '4 4' }}
+                  />
+                  <Area 
+                    type="monotone" 
+                    dataKey={chartView === 'performance' ? "cumReturn" : "value"} 
+                    stroke="var(--color-success)" 
+                    strokeWidth={2} 
+                    fillOpacity={1} 
+                    fill="url(#colorValue)" 
+                    dot={false} 
+                  />
+                  {compareEnabled && (
+                    <Line 
+                      type="monotone" 
+                      dataKey="spy" 
+                      stroke="#8b5cf6" 
+                      strokeWidth={2} 
+                      dot={false} 
+                      strokeDasharray="5 5"
+                    />
+                  )}
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Time Horizons at bottom */}
+            <div className="px-6 py-3 border-t border-border flex justify-center md:justify-end gap-2 overflow-x-auto no-scrollbar">
+              {["7D", "MTD", "YTD", "1Y", "ALL"].map((p) => (
                 <button 
                   key={p} 
                   onClick={() => setTimeHorizon(p)}
                   className={cn(
-                    "text-[9px] font-mono px-2 py-0.5 border transition-all",
+                    "text-[10px] font-bold px-3 py-1 rounded-sm transition-all",
                     timeHorizon === p 
-                      ? "border-accent text-accent bg-accent/10" 
-                      : "border-border hover:border-accent/50 text-text-secondary"
+                      ? "bg-surface text-accent" 
+                      : "text-text-muted hover:text-text-primary"
                   )}
                 >
                   {p}
                 </button>
               ))}
-              {userRole === 'PM' && (
-                <button className="p-1 px-2 border border-border hover:border-accent text-text-secondary transition-all" title="SYSTEM RECALC">
-                  <div className="w-1.5 h-1.5 bg-accent" />
-                </button>
-              )}
             </div>
-          </div>
-          <div className="h-[280px] w-full pr-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={performanceData}>
-                <defs>
-                  <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--color-accent)" stopOpacity={0.15}/>
-                    <stop offset="95%" stopColor="var(--color-accent)" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="2 2" vertical={false} stroke="var(--color-border)" strokeOpacity={0.3} />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: "var(--color-text-secondary)", fontWeight: 600 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: "var(--color-text-secondary)", fontWeight: 600 }} domain={['auto', 'auto']} tickFormatter={(v) => `$${v}`} />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: "var(--color-bg-secondary)", border: "1px solid var(--color-border)", borderRadius: "0", fontSize: "10px", fontFamily: "var(--font-mono)" }}
-                  cursor={{ stroke: 'var(--color-accent)', strokeWidth: 1 }}
-                />
-                <Area type="monotone" dataKey="value" stroke="var(--color-accent)" strokeWidth={2} fillOpacity={1} fill="url(#colorValue)" />
-                {compareEnabled && (
-                  <Line type="monotone" dataKey="spy" stroke="#10b981" strokeWidth={1} dot={false} strokeDasharray="3 3" />
-                )}
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          </DashboardCard>
+
+          {/* Change in NAV Panel */}
+          <DashboardCard
+            title="Change in NAV"
+            subtitle={advancedNavMetrics.label}
+            className="md:col-span-4" 
+          >
+            <div className="flex flex-col gap-4 mt-4 h-[280px] justify-between">
+               <div className="p-3 bg-surface border border-border rounded-lg text-center">
+                  <div className="flex items-center justify-center gap-3">
+                     <span className="text-gray-500 font-mono text-sm">${advancedNavMetrics.beginNav.toFixed(2)}</span>
+                     <ArrowUpRight size={16} className="text-gray-400" />
+                     <span className="font-semibold font-mono text-lg">${advancedNavMetrics.endNav.toFixed(2)}</span>
+                  </div>
+                  <div className={cn(
+                    "mt-2 text-sm font-bold flex items-center justify-center gap-2", 
+                    advancedNavMetrics.changeAmount >= 0 ? "text-success" : "text-danger"
+                  )}>
+                     <span>{advancedNavMetrics.changeAmount >= 0 ? '+' : ''}${advancedNavMetrics.changeAmount.toFixed(2)}</span>
+                     <span className={cn("px-1.5 py-0.5 rounded text-[10px]", advancedNavMetrics.changeAmount >= 0 ? "bg-success/10 text-success" : "bg-danger/10 text-danger")}>
+                       {advancedNavMetrics.changePercent >= 0 ? '+' : ''}{advancedNavMetrics.changePercent.toFixed(2)}%
+                     </span>
+                  </div>
+               </div>
+
+               <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                     <p className="text-[10px] uppercase text-gray-500 font-semibold tracking-wider">Best Day</p>
+                     <p className="text-sm font-semibold text-gray-800">{advancedNavMetrics.bestDay.date || '---'}</p>
+                     <p className="text-xs text-success font-medium">+{advancedNavMetrics.bestDay.return.toFixed(2)}%</p>
+                  </div>
+                  <div className="space-y-1">
+                     <p className="text-[10px] uppercase text-gray-500 font-semibold tracking-wider">Worst Day</p>
+                     <p className="text-sm font-semibold text-gray-800">{advancedNavMetrics.worstDay.date || '---'}</p>
+                     <p className="text-xs text-danger font-medium">{advancedNavMetrics.worstDay.return.toFixed(2)}%</p>
+                  </div>
+               </div>
+
+               <div className="pt-3 border-t border-border mt-auto">
+                 <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-500 uppercase tracking-wide">Net Capital Flow</span>
+                    <span className={cn("text-sm font-semibold", advancedNavMetrics.netCapitalFlow >= 0 ? "text-success" : "text-danger")}>
+                       {advancedNavMetrics.netCapitalFlow >= 0 ? '+' : ''}${Math.abs(advancedNavMetrics.netCapitalFlow).toLocaleString()}
+                    </span>
+                 </div>
+               </div>
+            </div>
+          </DashboardCard>
         </div>
 
-        {/* Detailed Allocation Column */}
-        <div className="lg:col-span-4 bg-bg-secondary p-5 border border-border flex flex-col">
-          <div className="flex items-center justify-between mb-8 border-b border-border/50 pb-3">
-            <h3 className="text-xs font-bold uppercase tracking-widest text-text-secondary flex items-center gap-2">
-              <Layers size={14} className="text-accent" />
-              ALLOCATION
-            </h3>
-          </div>
-          <div className="h-[180px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={assetAllocation} innerRadius={55} outerRadius={70} paddingAngle={2} dataKey="value" stroke="none">
-                  {assetAllocation.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip 
-                   contentStyle={{ backgroundColor: "var(--color-bg-secondary)", border: "1px solid var(--color-border)", fontSize: "10px" }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="mt-auto space-y-2 border-t border-border pt-4 max-h-[160px] overflow-y-auto pr-2 scrollbar-thin">
-            {assetAllocation.map((item) => (
-              <div key={item.name} className="flex items-center justify-between group">
-                <div className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5" style={{ backgroundColor: item.color }} />
-                  <span className="text-[10px] font-bold text-text-secondary group-hover:text-text-primary transition-colors uppercase tracking-wider">{item.name}</span>
-                </div>
-                <div className="flex items-center gap-3">
-                   <span className="text-xs font-mono font-bold">${item.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-                   <span className="text-[10px] font-mono text-text-secondary w-10 text-right">
-                    {((item.value / totalValue) * 100).toFixed(1)}%
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
+        {/* Row 3: Allocation Charts */}
+        <AllocationDonuts assets={enrichedAssets} cashBalance={fund.cashBalance} />
+
+        {/* Row 4: Forward Looking Panels */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+           <ProjectedIncome assets={enrichedAssets} />
+           <InvestmentThemes assets={enrichedAssets} />
         </div>
+
+        {/* Row 5: Movers and Table Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+           <div className="md:col-span-12 xl:col-span-12">
+             <PortfolioMovers assets={enrichedAssets} quotes={stockQuotes} totalMarketValue={totalAssetMarketValue} />
+           </div>
+           <div className="md:col-span-12">
+             <HoldingsTable assets={enrichedAssets} cashBalance={fund.cashBalance} quotes={stockQuotes} logos={tickerLogos} names={tickerNames} />
+           </div>
+        </div>
+      </div>
+      {/* Right Sidebar: Account Summary */}
+      <div className="w-full xl:w-[320px] shrink-0">
+         <div className="bg-bg-secondary border border-border rounded-sm overflow-hidden sticky top-6">
+            <div className="p-4 border-b border-border bg-surface/50 flex items-center justify-between">
+               <div>
+                 <h3 className="text-sm font-bold tracking-tight text-text-primary uppercase">Summary</h3>
+                 <p className="text-[10px] text-text-muted font-medium uppercase tracking-wider">{fund.id.split('-').slice(0, 2).join(' ')}</p>
+               </div>
+               {userRole === 'PM' && (
+                 <button 
+                   onClick={handleRevalue}
+                   className="p-1.5 hover:bg-white bg-surface border border-border rounded shadow-sm text-text-secondary hover:text-text-primary transition-colors"
+                   title="Refresh Market Data"
+                 >
+                   <RefreshCw size={14} className={cn(isRefreshing && "animate-spin")} />
+                 </button>
+               )}
+            </div>
+            
+            <div className="p-5 flex flex-col gap-4">
+               <div>
+                  <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">NAV Per Unit</div>
+                  <div className="text-3xl font-black text-text-primary tracking-tight">
+                    {formatPrice(Number(calculatedNav))}
+                  </div>
+               </div>
+               
+                <div className="flex flex-col gap-0 border-t border-gray-100">
+                    <SummaryRow label="NAV" value={formatCurrency(totalValue)} />
+                    <SummaryRow label="Cash" value={formatCurrency(fund.cashBalance)} />
+                    <SummaryRow 
+                      label="UP&L" 
+                      value={`${unrealizedPnL >= 0 ? '+' : ''}${formatCurrency(Math.abs(unrealizedPnL))}`} 
+                      colorClass={unrealizedPnL >= 0 ? 'text-success' : 'text-danger'}
+                    />
+                    <SummaryRow 
+                      label="RP&L" 
+                      value={`${realizedPnL >= 0 ? '+' : ''}${formatCurrency(Math.abs(realizedPnL))}`} 
+                      colorClass={realizedPnL >= 0 ? 'text-success' : 'text-danger'}
+                    />
+                    <SummaryRow label="Mkt Value" value={formatCurrency(totalAssetMarketValue)} />
+                    <SummaryRow 
+                      label="Holdings" 
+                      value={activeAssets.length.toString()} 
+                    />
+                </div>
+               
+               <div className="mt-2 pt-4 border-t border-gray-100">
+                  <div className="flex items-center justify-between text-xs text-text-muted">
+                     <span>Last Reconciled</span>
+                     <span className="font-mono">{(new Date(fund.updatedAt)).toLocaleTimeString()}</span>
+                  </div>
+               </div>
+            </div>
+         </div>
       </div>
 
-      {/* Top Equities Book (Filtered CASH) */}
-      <div className="bg-bg-secondary border border-border overflow-hidden text-left">
-        <div className="bg-surface px-4 py-2 border-b border-border flex justify-between items-center text-left">
-            <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] text-text-primary text-left">TOP POSITIONS</h3>
-            <span className="text-[9px] font-mono text-text-secondary uppercase">SETTLED</span>
-        </div>
-        <div className="overflow-x-auto overflow-y-hidden">
-          <table className="w-full text-left">
-            <thead>
-              <tr className="border-b border-border bg-bg-primary/30 text-left">
-                <th className="py-2 px-4 text-[9px] text-text-secondary uppercase tracking-widest text-left">TICKER</th>
-                <th className="py-2 px-2 text-[9px] text-text-secondary uppercase tracking-widest text-right">UNITS</th>
-                <th className="py-2 px-2 text-[9px] text-text-secondary uppercase tracking-widest text-right">MARK</th>
-                <th className="py-2 px-2 text-[9px] text-text-secondary uppercase tracking-widest text-right">VALUE</th>
-                <th className="py-2 px-4 text-[9px] text-text-secondary uppercase tracking-widest text-right">WEIGHT</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50">
-              {topPositions.map((asset) => (
-                <tr key={asset.id} className="hover:bg-accent/5 transition-colors group cursor-default">
-                  <td className="py-2 px-4 text-left">
-                    <div className="flex items-center gap-3 text-left">
-                       {tickerLogos[asset.ticker] ? (
-                         <img src={tickerLogos[asset.ticker]} alt={asset.ticker} className="w-4 h-4 rounded-full" />
-                       ) : (
-                         <div className="w-4 h-4 bg-accent/20 flex items-center justify-center text-[10px] font-bold text-accent">{asset.ticker?.[0]}</div>
-                       )}
-                       <span className="text-xs font-bold font-mono tracking-tight group-hover:text-accent transition-colors">{asset.ticker}</span>
-                       <span className="text-[10px] text-text-secondary uppercase ml-2 opacity-0 group-hover:opacity-100 transition-opacity font-medium tracking-widest truncate max-w-[150px]">{asset.name || "STOCK"}</span>
-                    </div>
-                  </td>
-                  <td className="py-2 px-2 text-right font-mono text-xs tabular-nums text-text-primary">{(asset.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                  <td className="py-2 px-2 text-right font-mono text-xs tabular-nums text-text-secondary">${(asset.price || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                  <td className="py-2 px-2 text-right font-mono text-xs tabular-nums font-bold text-text-primary">
-                    ${((asset.amount || 0) * (asset.price || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                  </td>
-                  <td className="py-2 px-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                       <div className="w-16 h-1 bg-surface rounded-none overflow-hidden hidden sm:block">
-                          <div className="h-full bg-accent/40" style={{ width: `${(asset.amount * asset.price / totalValue * 100)}%` }} />
-                       </div>
-                       <span className="text-[10px] font-mono text-text-secondary w-10 text-right">
-                        {((asset.amount * asset.price / totalValue) * 100).toFixed(1)}%
-                       </span>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+    </div>
+  );
+}
+
+function SummaryRow({ label, value, colorClass }: { label: string, value: string | React.ReactNode, colorClass?: string }) {
+  return (
+    <div className="flex items-center justify-between py-2.5 border-b border-gray-100 last:border-0 hover:bg-surface/20 transition-colors px-1">
+      <span className="text-[11px] font-medium text-text-secondary uppercase tracking-tight">{label}</span>
+      <span className={cn("text-xs font-bold text-text-primary tabular-nums", colorClass)}>
+        {value}
+      </span>
     </div>
   );
 }

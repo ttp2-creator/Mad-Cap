@@ -26,6 +26,7 @@ import Trades from "./components/Trades";
 import Settings from "./components/Settings";
 import Auth from "./components/Auth";
 import History from "./components/History";
+import Performance from "./components/Performance";
 import { Fund, Investor, LedgerEntry, Trade, Asset, FundSnapshot } from "./types";
 
 export default function App() {
@@ -36,9 +37,9 @@ export default function App() {
   const [theme, setTheme] = React.useState<"light" | "dark">(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem("mad-capital-theme");
-      return (saved as "light" | "dark") || "dark";
+      return (saved as "light" | "dark") || "light";
     }
-    return "dark";
+    return "light";
   });
 
   // Apply theme
@@ -181,8 +182,8 @@ export default function App() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-bg-primary flex items-center justify-center font-mono text-[10px] uppercase tracking-[0.4em] text-text-secondary animate-pulse px-10 text-center">
-        INITIALIZING MAD CAPITAL TERMINAL V2.4.0...
+      <div className="min-h-screen bg-bg-primary flex items-center justify-center font-sans text-xs text-text-muted animate-pulse px-10 text-center">
+        Establishing secure connection to MAD Capital...
       </div>
     );
   }
@@ -193,13 +194,13 @@ export default function App() {
 
   if (userRole === null) {
     return (
-      <div className="min-h-screen bg-bg-primary flex flex-col items-center justify-center font-mono text-[10px] uppercase tracking-[0.2em] text-text-secondary">
-        <p className="mb-8 border border-danger/30 bg-danger/5 px-6 py-3 text-danger font-bold">SECURE GATEWAY: ACCESS_DENIED</p>
+      <div className="min-h-screen bg-bg-primary flex flex-col items-center justify-center font-sans text-sm text-text-muted">
+        <p className="mb-8 border border-border bg-surface px-8 py-4 text-text-primary font-medium rounded-sm">Account access restricted. Please contact your administrator.</p>
         <button 
           onClick={handleLogout}
-          className="bg-accent text-bg-primary px-8 py-3 font-bold text-[10px] hover:bg-accent-hover transition-all uppercase tracking-[0.3em]"
+          className="bg-accent text-white px-8 py-2 font-bold text-xs hover:bg-accent-hover transition-all rounded-sm uppercase tracking-wider"
         >
-          SIGNOUT / DISCONNECT
+          Sign Out
         </button>
       </div>
     );
@@ -220,8 +221,17 @@ export default function App() {
           investors={investors}
           assets={assets}
           ledger={ledger}
+          trades={trades}
           snapshots={snapshots}
           userRole={userRole}
+        />
+      )}
+      {activeTab === "performance" && userRole && (
+        <Performance 
+          fund={activeFund}
+          snapshots={snapshots}
+          assets={assets}
+          ledger={ledger}
         />
       )}
       {activeTab === "portfolio" && userRole && (
